@@ -15,12 +15,32 @@ class TranscriptPreprocessingPipeline:
 
 file_path = "./transcript_preprocessing_pipeline.pkl"
 
+
 with open(file_path, "rb") as file:
     data = pickle.load(file)
 
 pprint(vars(data))
 
+print("//////////////////////////////////////////")
+
 with open("./item_cf_model.pkl", "rb") as file:
     data2 = pickle.load(file)
 
 pprint(vars(data2))
+
+print("//////////////////////////////////////////")
+
+with open("./item_cf_strict_model.pkl", "rb") as file:
+    data3 = pickle.load(file)
+
+pprint(vars(data3))
+
+print("//////////////////////////////////////////")
+
+with open("./user_cf_model.pkl", "rb") as file:
+    data4 = pickle.load(file)
+
+pprint(vars(data4))
+
+
+
