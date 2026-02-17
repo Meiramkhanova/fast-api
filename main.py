@@ -1,5 +1,6 @@
 import pickle
 from pprint import pprint
+import pandas as pd
 
 class TranscriptPreprocessingPipeline:
     def __init__(self):
@@ -12,10 +13,14 @@ class TranscriptPreprocessingPipeline:
         return f"Pipeline с attr1={self.attr1}, attr2={self.attr2}"
 
 
-file_path = "C:/Users/adina/Downloads/transcript_preprocessing_pipeline.pkl"
+file_path = "./transcript_preprocessing_pipeline.pkl"
 
 with open(file_path, "rb") as file:
     data = pickle.load(file)
 
-print(type(data))
-pprint(vars(data))  # показывает атрибуты объекта
+pprint(vars(data))
+
+with open("./item_cf_model.pkl", "rb") as file:
+    data2 = pickle.load(file)
+
+pprint(vars(data2))
