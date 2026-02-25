@@ -11,9 +11,16 @@ def recommend_subjects(df: pd.DataFrame, student_id, top_n=5):
     if not all(col in df.columns for col in ["StudentID", "SubjectNameRU", "Grade"]):
         return {"error": "Файл должен содержать колонки StudentID, SubjectNameRU, Grade"}
 
-    # Приводим StudentID к строке для единообразия
-    df["StudentID"] = df["StudentID"].astype(str)
-    student_id = str(student_id)
+    # Приводим StudentID к строке и чистим формат
+    df["StudentID"] = (
+        df["StudentID"]
+        .astype(str)
+        .str.strip()
+        .str.replace(".0", "", regex=False)
+        .str.replace(" ", "")
+    )
+
+    student_id = str(student_id).strip().replace(" ", "")
 
     # Пивот таблица
     pivot = df.pivot_table(
