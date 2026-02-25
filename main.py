@@ -81,7 +81,7 @@ async def recommend(file: UploadFile, student_id: str = Form(...)):
 
 @app.post("/recommendsecond/")
 async def recommend(student_id: str, file: UploadFile = File(...)):
-    # Чтение файла
+
     try:
         if file.filename.endswith(".csv"):
             df = pd.read_csv(file.file)
@@ -90,79 +90,122 @@ async def recommend(student_id: str, file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot read file: {e}")
 
-    # Предобработка
+    # ===============================
+    # PREPROCESSING
+    # ===============================
+
     df = df[["StudentID", "SubjectNameRU", "Grade"]].dropna()
+
     df["Grade"] = pd.to_numeric(df["Grade"], errors="coerce")
     df = df.dropna(subset=["Grade"])
+
     df["StudentID"] = df["StudentID"].astype(str).str.strip()
     df["SubjectNameRU"] = df["SubjectNameRU"].astype(str).str.strip()
 
     if student_id not in df["StudentID"].values:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    # Пивотная таблица и косинусное сходство предметов
-    pivot = df.pivot_table(index="StudentID", columns="SubjectNameRU", values="Grade", aggfunc="mean")
-    pivot_filled = pivot.fillna(0)
-    item_sim = pd.DataFrame(cosine_similarity(pivot_filled.T), index=pivot_filled.columns,
-                            columns=pivot_filled.columns)
+    # ===============================
+    # FAST FEATURE ENGINEERING
+    # ===============================
 
-    # Курсы, которые студент уже прошёл
-    taken = df[df["StudentID"] == student_id]["SubjectNameRU"].unique()
-    not_taken = [c for c in pivot.columns if c not in taken]
+    df["student_mean"] = df.groupby("StudentID")["Grade"].transform("mean")
+    df["student_max"] = df.groupby("StudentID")["Grade"].transform("max")
+    df["student_min"] = df.groupby("StudentID")["Grade"].transform("min")
+    df["student_count"] = df.groupby("StudentID")["Grade"].transform("count")
 
-    # Коллаборативная оценка
-    student_grades = df[df["StudentID"] == student_id].groupby("SubjectNameRU")["Grade"].mean()
-    cf_scores = {}
-    for course in not_taken:
-        sim_scores = item_sim[course].reindex(taken).dropna()
-        if sim_scores.sum() == 0:
-            cf_scores[course] = student_grades.mean()
-        else:
-            cf_scores[course] = sum(sim_scores[c] * student_grades.get(c, student_grades.mean()) for c in
-                                    sim_scores.index) / sim_scores.sum()
-    cf_df = pd.DataFrame(list(cf_scores.items()), columns=["SubjectNameRU", "cf_score"]).sort_values("cf_score",
-                                                                                                     ascending=False).head(
-        20)
+    df["course_mean"] = df.groupby("SubjectNameRU")["Grade"].transform("mean")
+    df["course_pop"] = df.groupby("SubjectNameRU")["StudentID"].transform("nunique")
 
-    if cf_df.empty:
-        return JSONResponse(content={"recommendations": []})
+    # ===============================
+    # PIVOT + SIMILARITY
+    # ===============================
 
-        # Признаки для модели XGBoost
+    pivot = df.pivot_table(
+        index="StudentID",
+        columns="SubjectNameRU",
+        values="Grade",
+        aggfunc="mean"
+    ).fillna(0)
 
-    def feats(sid, course):
-        sdata = df[df["StudentID"] == sid]
-        sgrades = sdata.groupby("SubjectNameRU")["Grade"].mean()
-        avg = sgrades.mean() if len(sgrades) > 0 else 3
-        max_g = sgrades.max() if len(sgrades) > 0 else 3
-        min_g = sgrades.min() if len(sgrades) > 0 else 3
-        num = len(sgrades)
-        sim_s = item_sim[course].reindex(
-            sdata["SubjectNameRU"].unique()).dropna() if course in item_sim else pd.Series()
-        cf = sum(sim_s[c] * sgrades.get(c, avg) for c in sim_s.index) / sim_s.sum() if len(sim_s) > 0 else avg
-        cavg = df[df["SubjectNameRU"] == course]["Grade"].mean() if course in df["SubjectNameRU"].values else avg
-        cpop = int(df[df["SubjectNameRU"] == course]["StudentID"].nunique())
-        return [avg, max_g, min_g, cf, cavg, num, cpop]
+    similarity_matrix = pd.DataFrame(
+        cosine_similarity(pivot.T),
+        index=pivot.columns,
+        columns=pivot.columns
+    )
 
-        # Тренировка модели
+    taken_courses = df[df["StudentID"] == student_id]["SubjectNameRU"].unique()
+    all_courses = pivot.columns.tolist()
+    not_taken = [c for c in all_courses if c not in taken_courses]
 
-    X_train, y_train = [], []
-    for _, row in df.iterrows():
-        sid, course, grade = row["StudentID"], row["SubjectNameRU"], row["Grade"]
-        train_data = df[(df["StudentID"] != sid) | (df["SubjectNameRU"] != course)]
-        X_train.append(feats(sid, course))
-        y_train.append(grade)
+    # ===============================
+    # TRAIN MODEL
+    # ===============================
 
-    model = xgb.XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
-                             random_state=42, verbosity=0)
-    model.fit(np.array(X_train), np.array(y_train))
+    feature_cols = [
+        "student_mean",
+        "student_max",
+        "student_min",
+        "student_count",
+        "course_mean",
+        "course_pop"
+    ]
 
-    # Предсказания
-    predictions = []
-    for course in cf_df["SubjectNameRU"]:
-        pred = float(model.predict([feats(student_id, course)])[0])
-        pred = round(np.clip(pred, 0, 4),2)
-        predictions.append({"SubjectNameRU": course, "PredictedGrade": pred})
+    train_df = df.copy()
 
-    # Топ-5
-    top5 = sorted(predictions, key=lambda x: x["PredictedGrade"], reverse=True)[:5]
+    X = train_df[feature_cols]
+    y = train_df["Grade"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=0.2,
+        random_state=42
+    )
+
+    model = xgb.XGBRegressor(
+        n_estimators=200,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42,
+        verbosity=0
+    )
+
+    model.fit(X_train, y_train)
+
+    # ===============================
+    # RECOMMENDATIONS
+    # ===============================
+
+    student_row = df[df["StudentID"] == student_id].iloc[0]
+
+    recs = []
+
+    for course in not_taken[:20]:
+
+        temp = pd.DataFrame([{
+            "student_mean": student_row["student_mean"],
+            "student_max": student_row["student_max"],
+            "student_min": student_row["student_min"],
+            "student_count": student_row["student_count"],
+            "course_mean": df[df["SubjectNameRU"] == course]["Grade"].mean(),
+            "course_pop": df[df["SubjectNameRU"] == course]["StudentID"].nunique()
+        }])
+
+        pred = float(model.predict(temp)[0])
+        pred = round(np.clip(pred, 0, 4), 2)
+
+        recs.append({
+            "SubjectNameRU": course,
+            "PredictedGrade": pred
+        })
+
+    top5 = (
+        pd.DataFrame(recs)
+        .sort_values("PredictedGrade", ascending=False)
+        .head(5)
+        .to_dict(orient="records")
+    )
+
     return JSONResponse(content={"recommendations": top5})
